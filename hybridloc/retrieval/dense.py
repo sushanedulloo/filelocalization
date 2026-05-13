@@ -23,8 +23,16 @@ class DenseRetriever:
         import os
         self.model_name = model_name
         self.finetuned_path = Path(finetuned_path) if finetuned_path else None
-        # respect HYBRIDLOC_EMBED_DEVICE env var; default to cpu to avoid CUDA OOM on shared servers
-        self.device = device or os.environ.get("HYBRIDLOC_EMBED_DEVICE", "cpu")
+        # respect HYBRIDLOC_EMBED_DEVICE env var; auto-detect GPU if available, else CPU
+        import torch
+        if device:
+            self.device = device
+        elif os.environ.get("HYBRIDLOC_EMBED_DEVICE"):
+            self.device = os.environ["HYBRIDLOC_EMBED_DEVICE"]
+        elif torch.cuda.is_available():
+            self.device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+        else:
+            self.device = "cpu"
         self._model = None  # type: ignore[assignment]
         self._doc_ids: list[str] = []
         self._doc_emb: np.ndarray | None = None
