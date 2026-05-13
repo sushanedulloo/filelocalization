@@ -23,14 +23,20 @@ class DenseRetriever:
         import os
         self.model_name = model_name
         self.finetuned_path = Path(finetuned_path) if finetuned_path else None
-        # respect HYBRIDLOC_EMBED_DEVICE env var; auto-detect GPU if available, else CPU
+        # respect HYBRIDLOC_EMBED_DEVICE env var; auto-pick GPU with most free memory, else CPU
         import torch
         if device:
             self.device = device
         elif os.environ.get("HYBRIDLOC_EMBED_DEVICE"):
             self.device = os.environ["HYBRIDLOC_EMBED_DEVICE"]
         elif torch.cuda.is_available():
-            self.device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+            best_gpu, best_free = 0, 0
+            for i in range(torch.cuda.device_count()):
+                free = torch.cuda.mem_get_info(i)[0]
+                if free > best_free:
+                    best_free, best_gpu = free, i
+            # only use GPU if at least 6GB free (model needs ~550MB but indexing needs more)
+            self.device = f"cuda:{best_gpu}" if best_free > 6 * 1024**3 else "cpu"
         else:
             self.device = "cpu"
         self._model = None  # type: ignore[assignment]
