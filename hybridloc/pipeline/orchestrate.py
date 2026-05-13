@@ -212,7 +212,11 @@ class HybridLocPipeline:
             issue_used, temperature = _run_variant(issue, run_ix, self.nim)
             issue_emb = self.dense.encode([issue_used])[0]
 
-            seeds = build_seed_set(bundle.graph, symptoms, issue_embedding=issue_emb)
+            seeds = build_seed_set(
+                bundle.graph, symptoms,
+                issue_embedding=issue_emb,
+                stage1_candidate_files=s1.candidate_files,
+            )
             traverser = Traverser(
                 bundle.graph,
                 repo_root=repo_root,

@@ -24,6 +24,7 @@ PRIORS = {
     "literal": 0.8,
     "concept": 0.5,
     "memory": 0.4,
+    "stage1": 0.3,
 }
 
 
@@ -35,6 +36,7 @@ def build_seed_set(
     concept_top_k: int = 3,
     memory_top_k: int = 10,
     cap: int = 30,
+    stage1_candidate_files: list[str] | None = None,
 ) -> list[Seed]:
     seeds: dict[str, Seed] = {}
 
@@ -91,6 +93,15 @@ def build_seed_set(
                     continue
                 if g.nodes[v].get("data") and g.nodes[v]["data"].node_type == NodeType.FUNCTION:
                     _add(v, PRIORS["concept"], "concept")
+
+    # 4) Stage 1 fallback seeds — always add all functions from the top-K candidate files
+    # This guarantees a non-empty seed set even when symptoms are weak and concepts are skipped.
+    if stage1_candidate_files:
+        for nid, data in g.nodes(data="data"):
+            if not data or data.node_type != NodeType.FUNCTION:
+                continue
+            if data.file_path in stage1_candidate_files:
+                _add(nid, PRIORS.get("stage1", 0.3), "stage1")
 
     # cap by prior
     ordered = sorted(seeds.values(), key=lambda s: -s.prior)
