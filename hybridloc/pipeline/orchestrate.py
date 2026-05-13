@@ -244,6 +244,9 @@ class HybridLocPipeline:
         stage_bar.set_description(f"[{instance_id}] done — top: {voted[0].function_key if voted else 'none'}")
         stage_bar.close()
         info(f"[Done] instance='{instance_id}'  top_result={voted[0].function_key if voted else 'none'}  confidence={voted[0].confidence if voted else 'n/a'}")
+        info(f"[Done] Final ranked predictions:")
+        for i, v in enumerate(voted[:10]):
+            info(f"[Done]   #{i+1} {v.function_key} score={v.score:.3f} confidence={v.confidence} runs={v.runs_appearing}/{len(runs)} lines={v.suspect_lines}")
         return PipelineResult(
             instance_id=instance_id,
             ranked=voted,

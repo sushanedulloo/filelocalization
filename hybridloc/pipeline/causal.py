@@ -60,7 +60,12 @@ class AbductiveReasoner:
             json_schema={"type": "object"},
             temperature=0.0,
         )
-        return _parse(resp.text)
+        from ..log import info
+        update = _parse(resp.text)
+        for ch in update.chains:
+            info(f"[Causal] {ch.function_key} score={ch.score:.1f} chain={' → '.join(ch.chain[:4])}")
+        info(f"[Causal] next_to_explore: {update.next_to_explore[:5]}")
+        return update
 
 
 def _parse(raw: str) -> CausalUpdate:

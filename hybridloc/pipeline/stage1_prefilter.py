@@ -105,7 +105,8 @@ class PreFilter:
                         seen.add(p)
                         merged.append(p)
 
-        return Stage1Result(
+        from ..log import info
+        result = Stage1Result(
             candidate_files=merged[: self.top_k],
             bm25_top=bm25_top,
             dense_top=dense_top,
@@ -113,6 +114,16 @@ class PreFilter:
             skeleton_count=len(skels),
             notes=notes,
         )
+        info(f"[Stage 1] BM25 top-5: {[p for p, _ in bm25_top[:5]]}")
+        info(f"[Stage 1] Dense top-5: {[p for p, _ in dense_top[:5]]}")
+        info(f"[Stage 1] LLM top-5:  {[p for p, r in llm_top[:5]]}")
+        for p, r in llm_top[:5]:
+            info(f"[Stage 1]   → {p}: {r[:120]}")
+        info(f"[Stage 1] Final merged top-10: {merged[:10]}")
+        if notes:
+            for n in notes:
+                info(f"[Stage 1] NOTE: {n}")
+        return result
 
     # ---------- internals ----------
 

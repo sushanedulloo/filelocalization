@@ -44,6 +44,7 @@ class SymptomExtractor:
         ).read_text()
 
     def extract(self, issue: str) -> Symptoms:
+        from ..log import info
         prompt = self._tpl.format(issue=issue.strip()[:8000])
         resp = self.nim.complete(
             prompt,
@@ -51,7 +52,13 @@ class SymptomExtractor:
             json_schema={"type": "object"},
             temperature=0.0,
         )
-        return _parse(resp.text)
+        symptoms = _parse(resp.text)
+        info(f"[Stage 3] exception_types: {symptoms.exception_types}")
+        info(f"[Stage 3] error_messages:  {symptoms.error_messages[:3]}")
+        info(f"[Stage 3] stack_frames:    {[(sf.file, sf.func, sf.line) for sf in symptoms.stack_frames]}")
+        info(f"[Stage 3] behaviors:       {symptoms.behaviors}")
+        info(f"[Stage 3] api_calls_named: {symptoms.api_calls_named}")
+        return symptoms
 
 
 def _parse(raw: str) -> Symptoms:

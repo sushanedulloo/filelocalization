@@ -69,6 +69,7 @@ class Reranker:
         if len(top) > 1:
             top = self._listwise_rerank(graph, issue, top)
 
+        from ..log import info
         # 3. confidence labels (set by consistency-vote step downstream; defaults here)
         out: list[RankedItem] = []
         for nid, score, cand in top:
@@ -88,6 +89,10 @@ class Reranker:
                     qualname=data.qualname,
                 )
             )
+        info(f"[Stage 5] Rerank output ({len(out)} candidates):")
+        for i, r in enumerate(out[:10]):
+            chain = " → ".join(r.causal_chain[:3]) if r.causal_chain else "(no chain)"
+            info(f"[Stage 5]   #{i+1} {r.function_key} score={r.score:.3f} lines={r.suspect_lines} chain={chain}")
         return out
 
     # ---------------- internals ----------------
