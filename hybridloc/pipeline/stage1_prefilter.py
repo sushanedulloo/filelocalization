@@ -75,9 +75,10 @@ class PreFilter:
         bm25 = BM25Retriever(texts, ids)
         bm25_top = bm25.query(issue, top_k=self.per_retriever_k)
 
-        # 2) Dense (optional — skipped if no model wired)
+        # 2) Dense (optional — skipped if no model wired or HYBRIDLOC_SKIP_DENSE=1)
+        import os
         dense_top: list[tuple[str, float]] = []
-        if self.dense is not None:
+        if self.dense is not None and os.environ.get("HYBRIDLOC_SKIP_DENSE", "0") != "1":
             try:
                 self.dense.index(texts, ids)
                 dense_top = self.dense.query(issue, top_k=self.per_retriever_k)
