@@ -100,7 +100,12 @@ class Traverser:
         if self.dense is not None:
             self._issue_emb = self.dense.encode([issue])[0]
 
+        from ..log import info
+        info(f"[Traversal] Starting with {len(seeds)} seeds")
         for s in seeds:
+            data = self.g.nodes[s.node_id].get("data") if s.node_id in self.g else None
+            name = data.qualname if data else s.node_id
+            info(f"[Traversal] Seed: {name} (prior={s.prior:.2f}, source={s.provenance})")
             self._distances[s.node_id] = 0
             self._push(
                 Action(
@@ -114,11 +119,15 @@ class Traverser:
         stable_iters = 0
         last_top3: tuple[str, ...] = ()
 
+        from ..log import info
         while self._heap and self._iter < self.cfg.max_iterations:
             self._iter += 1
-            _, _, action = heapq.heappop(self._heap)
+            _, priority_neg, action = heapq.heappop(self._heap)
             if action.target_id in self._visited and action.kind == ActionKind.READ_FUNCTION:
                 continue
+            data = self.g.nodes[action.target_id].get("data") if action.target_id in self.g else None
+            name = data.qualname if data else action.target_id
+            info(f"[Traversal] iter={self._iter:02d} action={action.kind.value} target={name} depth={action.depth} queue_size={len(self._heap)}")
             self._execute(action)
 
             # periodically run causal reasoning
@@ -149,7 +158,14 @@ class Traverser:
         if self._buffered_for_causal and self._think_calls < self.cfg.max_think_high_calls:
             self._run_causal()
 
-        return self._top(self.cfg.output_top_n)
+        from ..log import info
+        top = self._top(self.cfg.output_top_n)
+        info(f"[Traversal] Done — termination={self._termination}, iters={self._iter}, think_calls={self._think_calls}, candidates={len(top)}")
+        for i, c in enumerate(top[:5]):
+            data = self.g.nodes[c.node_id].get("data") if c.node_id in self.g else None
+            name = f"{data.file_path}::{data.qualname}" if data else c.node_id
+            info(f"[Traversal] Top-{i+1}: {name} score={c.score:.3f} chain_score={c.chain_score:.1f}")
+        return top
 
     @property
     def termination_reason(self) -> str:
