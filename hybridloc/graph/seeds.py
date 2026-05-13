@@ -94,14 +94,20 @@ def build_seed_set(
                 if g.nodes[v].get("data") and g.nodes[v]["data"].node_type == NodeType.FUNCTION:
                     _add(v, PRIORS["concept"], "concept")
 
-    # 4) Stage 1 fallback seeds — always add all functions from the top-K candidate files
-    # This guarantees a non-empty seed set even when symptoms are weak and concepts are skipped.
+    # 4) Stage 1 fallback seeds — add functions from candidate files with rank-weighted priors
+    # Top-ranked files get higher prior so they dominate the seed cap.
     if stage1_candidate_files:
+        n_files = len(stage1_candidate_files)
+        rank_map = {f: i for i, f in enumerate(stage1_candidate_files)}
         for nid, data in g.nodes(data="data"):
             if not data or data.node_type != NodeType.FUNCTION:
                 continue
-            if data.file_path in stage1_candidate_files:
-                _add(nid, PRIORS.get("stage1", 0.3), "stage1")
+            rank = rank_map.get(data.file_path)
+            if rank is None:
+                continue
+            # prior decays from 0.35 (rank 0) to 0.15 (last rank)
+            prior = 0.35 - 0.20 * (rank / max(1, n_files - 1))
+            _add(nid, prior, "stage1")
 
     # cap by prior
     ordered = sorted(seeds.values(), key=lambda s: -s.prior)

@@ -20,9 +20,11 @@ class DenseRetriever:
         finetuned_path: str | Path | None = None,
         device: str | None = None,
     ):
+        import os
         self.model_name = model_name
         self.finetuned_path = Path(finetuned_path) if finetuned_path else None
-        self.device = device
+        # respect HYBRIDLOC_EMBED_DEVICE env var; default to cpu to avoid CUDA OOM on shared servers
+        self.device = device or os.environ.get("HYBRIDLOC_EMBED_DEVICE", "cpu")
         self._model = None  # type: ignore[assignment]
         self._doc_ids: list[str] = []
         self._doc_emb: np.ndarray | None = None
