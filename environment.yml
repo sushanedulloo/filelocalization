@@ -1,0 +1,15 @@
+# Mac / dev env (CPU + MPS). For the CUDA box, use environment.linux-cuda.yml.
+#
+# Create with:  conda env create -f environment.yml
+# Update with:  conda env update -f environment.yml --prune
+
+name: hybridloc
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch=2.3.1   # CPU/MPS build on macOS arm64
+  - pip:
+      - -e .[dev]

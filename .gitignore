@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Env / secrets
+.env
+.env.local
+
+# Caches and data
+data/skeletons/
+data/graphs/
+data/embeddings/
+data/sweloc/
+data/swebench/
+data/nim_cache/
+data/repos/
+results/*.csv
+results/*.json
+!results/snapshots/
+
+# Model checkpoints
+*.pt
+*.ckpt
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/

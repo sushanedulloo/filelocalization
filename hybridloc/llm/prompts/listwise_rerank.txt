@@ -1,0 +1,19 @@
+You are reranking a small list of candidate functions for a software issue.
+
+ISSUE:
+{issue}
+
+CANDIDATES (each with a causal chain explaining why it might be the bug):
+{candidates}
+
+Task: Output a re-ordering of these candidates from most-likely the root cause
+to least-likely, with a confidence score and a verdict on whether the causal
+chain is sufficient.
+
+Return ONLY a JSON object:
+{{
+  "ranking": [
+    {{"id": "<file_path>::<qualname>", "confidence": 0.0, "chain_sufficient": true}},
+    ...
+  ]
+}}

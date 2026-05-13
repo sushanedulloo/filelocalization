@@ -1,0 +1,20 @@
+You are localizing the file(s) most likely to need editing to fix a software issue.
+
+ISSUE DESCRIPTION:
+{issue}
+
+REPOSITORY OUTLINE (file path → summary + classes/functions):
+{outline}
+
+Task: From the listed files, return the {top_k} most likely to need edits.
+Reason from symptom keywords, named APIs, stack-frame paths if any, and
+behavioral cues. Prefer files whose contents (not just names) plausibly
+implement the affected behavior.
+
+Return ONLY a JSON object of the form:
+{{
+  "files": [
+    {{"path": "<repo-relative path>", "reason": "<one short sentence>"}},
+    ...
+  ]
+}}

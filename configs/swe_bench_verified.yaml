@@ -1,0 +1,18 @@
+# SWE-bench Verified eval config. Inherits base.yaml + deepseek_v4_flash.yaml.
+
+inherits:
+  - base.yaml
+  - deepseek_v4_flash.yaml
+
+dataset:
+  name: princeton-nlp/SWE-bench_Verified
+  split: test
+  expected_count: 500
+
+repos_root: data/repos
+results_dir: results
+results_csv: results/swebench_verified.csv
+
+# Override budgets to be eval-friendly
+budgets:
+  consistency_runs: 3

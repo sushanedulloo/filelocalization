@@ -1,0 +1,44 @@
+# Base config: priority-queue weights, thresholds, budgets.
+# Tuned in week 8 via random search on the 30-issue dev split.
+
+priority_weights:
+  w_sem: 1.0
+  w_chain: 0.8
+  w_seed: 0.6
+  w_recent: 0.2
+  w_depth: 0.4
+  w_visited: 2.0
+
+seed_priors:
+  stack_frame: 1.0
+  literal_match: 0.8
+  concept_top3: 0.5
+  memory: 0.4
+
+thresholds:
+  drill_chain_score: 7.0          # min causal-chain score to fire DRILL_STATEMENTS
+  symptom_cosine_cutoff: 0.55     # min cosine for symptom -> function literal links
+  chain_decay_iterations: 10      # linear decay of chain score over this many iters
+
+budgets:
+  stage1_top_files: 20
+  stage1_recall_at_k_target: 0.85
+  stage4_max_iterations: 30
+  stage4_max_think_high_calls: 12
+  stage4_action_queue_cap: 1000
+  stage5_top_k_rerank: 20
+  stage5_listwise_top_k: 10
+  consistency_runs: 3
+
+retrieval:
+  bi_encoder_model: nomic-ai/CodeRankEmbed
+  bi_encoder_finetuned_path: data/embeddings/sweloc_finetuned/best.pt
+  embedding_dim: 768
+  max_seq_length: 8192
+
+graph:
+  repomem_commit_window: 7000
+  repomem_max_files: 200
+  co_evolved_min_count: 3
+  concept_kmeans_min_k: 5
+  concept_kmeans_max_k: 500

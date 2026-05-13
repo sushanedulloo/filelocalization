@@ -1,0 +1,20 @@
+# NIM / DeepSeek-V4-Flash settings.
+# Per-stage mode mapping is in HybridLoc_v2_plan.md §9 table.
+
+nim:
+  base_url: https://integrate.api.nvidia.com/v1
+  model: deepseek-ai/deepseek-v4-pro
+  max_concurrency: 16
+  request_timeout_s: 120
+  cache_dir: data/nim_cache
+
+# Which mode each pipeline call site uses.
+modes:
+  stage1_file_rank: non-think
+  stage2_function_summary: non-think       # offline, ~50k calls per repo
+  stage3_symptom_extract: non-think
+  stage4_skeleton_score: non-think
+  stage4_causal_chain: think-high          # ~12 calls per issue
+  stage5_explanation: non-think
+  stage5_listwise_rerank: think-high
+  stage5_paraphrase_issue: non-think       # for consistency-vote run C
