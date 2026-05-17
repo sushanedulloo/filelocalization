@@ -46,26 +46,28 @@ RESULTS_DIR="results/overnight"
 log()  { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 fail() { log "ERROR: $*"; exit 1; }
 
-pick_gpu() {
-  # Pick the two GPUs with the most free memory:
-  #   OLLAMA_GPU       — for Ollama serving llama-3.1-8b (~5-8 GB)
-  #   EMBED_GPU        — for CodeRankEmbed dense retriever (~600 MB)
-  # If only one GPU has enough free memory, both use the same one.
-  # Honors CUDA_VISIBLE_DEVICES if user set it (then both use that GPU).
+SORTED_GPU_LIST=()       # GPUs sorted by free memory descending (populated by rank_gpus)
+
+rank_gpus() {
+  # Populate SORTED_GPU_LIST with GPU indices sorted by free memory descending.
+  # Also sets OLLAMA_GPU (top candidate) and EMBED_GPU (second-best).
+  # Honors CUDA_VISIBLE_DEVICES if user set it (only that GPU is considered).
+  SORTED_GPU_LIST=()
   if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     log "Using preset CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    SORTED_GPU_LIST=("${CUDA_VISIBLE_DEVICES}")
     OLLAMA_GPU="${CUDA_VISIBLE_DEVICES}"
     EMBED_GPU="${CUDA_VISIBLE_DEVICES}"
     return
   fi
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     log "nvidia-smi not found; defaulting to GPU 0"
+    SORTED_GPU_LIST=(0)
     OLLAMA_GPU=0
     EMBED_GPU=0
     return
   fi
 
-  # Collect (index, free_mib) pairs into parallel arrays
   local -a idxs=() frees=()
   while IFS=',' read -r idx free; do
     idx="${idx// /}"
@@ -75,37 +77,66 @@ pick_gpu() {
     frees+=("$free")
   done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits)
 
-  # Sort by free memory descending (simple insertion sort, list is small)
-  local n=${#idxs[@]}
-  local i j
+  # insertion sort by free memory desc
+  local n=${#idxs[@]} i j
   for ((i=1; i<n; i++)); do
-    local key_idx=${idxs[i]}
-    local key_free=${frees[i]}
+    local key_idx=${idxs[i]} key_free=${frees[i]}
     j=$((i-1))
     while [ $j -ge 0 ] && [ "${frees[j]}" -lt "$key_free" ]; do
-      idxs[$((j+1))]=${idxs[j]}
-      frees[$((j+1))]=${frees[j]}
-      j=$((j-1))
+      idxs[$((j+1))]=${idxs[j]}; frees[$((j+1))]=${frees[j]}; j=$((j-1))
     done
-    idxs[$((j+1))]=$key_idx
-    frees[$((j+1))]=$key_free
+    idxs[$((j+1))]=$key_idx; frees[$((j+1))]=$key_free
+  done
+
+  SORTED_GPU_LIST=("${idxs[@]}")
+  log "GPU ranking by free memory:"
+  for ((i=0; i<n; i++)); do
+    log "  GPU ${idxs[i]}: ${frees[i]} MiB free"
   done
 
   OLLAMA_GPU="${idxs[0]}"
-  local ollama_free="${frees[0]}"
-  if [ "$ollama_free" -lt "$MIN_FREE_MB" ]; then
-    log "Warning: best GPU (${OLLAMA_GPU}) has only ${ollama_free} MiB free; need ${MIN_FREE_MB} MiB"
-    log "Continuing anyway — Ollama may fall back to CPU or fail"
-  fi
-  log "Ollama → GPU ${OLLAMA_GPU} (${ollama_free} MiB free)"
-
   if [ "$n" -gt 1 ] && [ "${frees[1]}" -ge 2000 ]; then
     EMBED_GPU="${idxs[1]}"
-    log "Dense retriever → GPU ${EMBED_GPU} (${frees[1]} MiB free)"
   else
     EMBED_GPU="$OLLAMA_GPU"
-    log "Dense retriever → GPU ${EMBED_GPU} (shared with Ollama)"
   fi
+  log "Dense retriever → GPU ${EMBED_GPU}"
+}
+
+verify_full_gpu_offload() {
+  # Send a probe request to force model loading, then check the ollama log
+  # for partial offload. Returns 0 if all model layers are on GPU, 1 otherwise.
+  local probe_timeout=120
+  log "  Probing Ollama with a small request to trigger model load..."
+  curl -sS -m "$probe_timeout" "http://localhost:${OLLAMA_PORT}/api/generate" \
+       -H "Content-Type: application/json" \
+       -d "{\"model\":\"${OLLAMA_MODEL}\",\"prompt\":\"ok\",\"stream\":false,\"options\":{\"num_predict\":3}}" \
+       >/dev/null 2>&1 || true
+  sleep 2
+
+  local last_offload
+  last_offload=$(grep 'msg="offload to' /tmp/ollama.log 2>/dev/null | tail -1)
+  if [ -z "$last_offload" ]; then
+    log "  WARN: no 'offload to' entry in ollama log yet; cannot verify. Assuming GPU."
+    return 0
+  fi
+
+  # Parse layers.model=N and layers.offload=M
+  local total offloaded
+  total=$(echo "$last_offload" | grep -oE 'layers\.model=[0-9]+' | cut -d= -f2)
+  offloaded=$(echo "$last_offload" | grep -oE 'layers\.offload=[0-9]+' | cut -d= -f2)
+
+  if [ -z "$total" ] || [ -z "$offloaded" ]; then
+    log "  WARN: could not parse offload counts. Assuming GPU."
+    return 0
+  fi
+
+  if [ "$offloaded" -lt "$total" ]; then
+    log "  ✗ Partial offload: ${offloaded}/${total} layers on GPU (rest on CPU)"
+    return 1
+  fi
+  log "  ✓ Full offload: all ${total} layers on GPU"
+  return 0
 }
 
 verify_env() {
@@ -132,21 +163,52 @@ EOF
 }
 
 ensure_ollama() {
+  # Try each candidate GPU in order until one gives full GPU offload.
+  # If any existing Ollama process is running, kill it first to start clean —
+  # we cannot trust that it loaded the model fully on GPU.
   if curl -sSf "http://localhost:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1; then
-    log "Ollama is already running on port ${OLLAMA_PORT}"
-  else
-    log "Starting Ollama server on GPU ${OLLAMA_GPU} ..."
-    CUDA_VISIBLE_DEVICES="${OLLAMA_GPU}" \
-      nohup ollama serve > /tmp/ollama.log 2>&1 &
-    sleep 8
-    curl -sSf "http://localhost:${OLLAMA_PORT}/api/tags" >/dev/null \
-      || fail "Ollama failed to start. Check /tmp/ollama.log"
-    log "Ollama started"
+    log "Existing Ollama detected — killing it to ensure clean GPU placement"
+    pkill -9 -f "ollama serve" 2>/dev/null || true
+    sleep 5
   fi
 
+  # Make sure we have the model pulled before trying placements
+  # (pull a separate ollama serve instance briefly if needed)
   log "Ensuring model ${OLLAMA_MODEL} is available ..."
+  CUDA_VISIBLE_DEVICES="${SORTED_GPU_LIST[0]}" \
+    nohup ollama serve > /tmp/ollama_pull.log 2>&1 &
+  sleep 6
   ollama pull "${OLLAMA_MODEL}" >/dev/null
+  pkill -9 -f "ollama serve" 2>/dev/null || true
+  sleep 3
   log "Model ready"
+
+  # Try each GPU until one gives full offload
+  for gpu in "${SORTED_GPU_LIST[@]}"; do
+    log "Trying Ollama on GPU ${gpu} ..."
+    CUDA_VISIBLE_DEVICES="${gpu}" OLLAMA_NUM_PARALLEL=1 \
+      nohup ollama serve > /tmp/ollama.log 2>&1 &
+    sleep 8
+
+    if ! curl -sSf "http://localhost:${OLLAMA_PORT}/api/tags" >/dev/null; then
+      log "  Ollama failed to start on GPU ${gpu}; trying next"
+      pkill -9 -f "ollama serve" 2>/dev/null || true
+      sleep 3
+      continue
+    fi
+
+    if verify_full_gpu_offload; then
+      OLLAMA_GPU="$gpu"
+      log "Ollama running on GPU ${OLLAMA_GPU} with full offload ✓"
+      return
+    fi
+
+    log "  Killing partial-offload Ollama and trying next GPU"
+    pkill -9 -f "ollama serve" 2>/dev/null || true
+    sleep 5
+  done
+
+  fail "No GPU could host ${OLLAMA_MODEL} with full offload. Check /tmp/ollama.log and free up GPU memory."
 }
 
 run_repo() {
@@ -184,7 +246,7 @@ cd "$(dirname "$0")/.."   # cd to repo root
 mkdir -p "${OVERNIGHT_LOG_DIR}" "${RESULTS_DIR}" data/graphs data/nim_cache
 
 verify_env
-pick_gpu
+rank_gpus
 ensure_ollama
 
 # Tell the Python pipeline which GPU to use for the dense retriever
