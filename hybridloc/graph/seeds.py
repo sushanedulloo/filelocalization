@@ -50,6 +50,55 @@ def _seeds_per_file_budget(rank: int) -> int:
     return max(2, math.ceil(8 * math.exp(-0.4 * rank)))
 
 
+def _rank_functions_in_file(
+    funcs: list[tuple[str, "any"]],
+    issue_embedding: np.ndarray | None,
+    dense,
+) -> list[tuple[str, "any"]]:
+    """Rank a file's functions by relevance to the issue.
+
+    Preference order:
+      1. Live dense retriever similarity on function name+docstring+code
+         (most accurate, requires dense retriever)
+      2. Centroid similarity (works only if concepts have been extracted)
+      3. Declaration order (fallback when nothing else is available)
+    """
+    if not funcs:
+        return funcs
+
+    # Path 1: live dense encoding
+    if dense is not None and issue_embedding is not None:
+        texts = []
+        for _, d in funcs:
+            head = d.qualname or d.name or ""
+            doc = d.docstring or ""
+            code_snippet = (d.code or "")[:600]
+            texts.append(f"{head}\n{doc}\n{code_snippet}".strip())
+        try:
+            embs = dense.encode(texts)
+            sims = embs @ issue_embedding
+            order = np.argsort(-sims)
+            return [funcs[i] for i in order]
+        except Exception:
+            pass  # fall through to centroid path
+
+    # Path 2: centroid (requires concept extraction)
+    if issue_embedding is not None:
+        def _sim(item):
+            _, d = item
+            centroid = (d.extra or {}).get("centroid")
+            if centroid is None:
+                return 0.0
+            c = np.asarray(centroid, dtype=np.float32)
+            return float(np.dot(c, issue_embedding))
+        scored = [(item, _sim(item)) for item in funcs]
+        if any(s > 0 for _, s in scored):  # centroids exist
+            return [item for item, _ in sorted(scored, key=lambda x: -x[1])]
+
+    # Path 3: declaration order
+    return funcs
+
+
 def build_seed_set(
     g: nx.MultiDiGraph,
     symptoms: Symptoms,
@@ -59,6 +108,7 @@ def build_seed_set(
     memory_top_k: int = 10,
     cap: int = 30,
     stage1_candidate_files: list[str] | None = None,
+    dense=None,
 ) -> list[Seed]:
     seeds: dict[str, Seed] = {}
 
@@ -131,8 +181,10 @@ def build_seed_set(
             if data.file_path in rank_map:
                 funcs_by_file.setdefault(data.file_path, []).append((nid, data))
 
-        # for each file, score each function vs issue (if embedding available) so
-        # we pick the file's MOST relevant N functions, not arbitrary ones
+        # For each file, score each function vs issue using live dense
+        # embeddings so we pick the most relevant N functions, not arbitrary
+        # declaration-order ones. Falls back to centroid (if concepts built)
+        # or declaration order if no dense retriever is available.
         for file_path, funcs in funcs_by_file.items():
             rank = rank_map[file_path]
             budget = _seeds_per_file_budget(rank)
@@ -140,19 +192,7 @@ def build_seed_set(
             if _is_test_file(file_path):
                 base_prior *= _TEST_FILE_PENALTY
 
-            # rank this file's functions: by issue embedding similarity if available,
-            # else fall back to declaration order
-            if issue_embedding is not None:
-                def _sim(item):
-                    _, d = item
-                    centroid = (d.extra or {}).get("centroid")
-                    if centroid is None:
-                        return 0.0
-                    c = np.asarray(centroid, dtype=np.float32)
-                    return float(np.dot(c, issue_embedding))
-                ranked_funcs = sorted(funcs, key=_sim, reverse=True)
-            else:
-                ranked_funcs = funcs
+            ranked_funcs = _rank_functions_in_file(funcs, issue_embedding, dense)
 
             for nid, _ in ranked_funcs[:budget]:
                 _add(nid, base_prior, "stage1")

@@ -57,7 +57,24 @@ class Reranker:
         graph: nx.MultiDiGraph,
         issue: str,
         candidates: list[Candidate],
+        stage1_files: list[str] | None = None,
+        extra_pool_top_files: int = 3,
+        extra_pool_per_file: int = 3,
     ) -> list[RankedItem]:
+        # RGFL-style "extended candidate pool" (plan §7.1):
+        # After Stage 4 traversal, also add the most issue-relevant functions
+        # from the top Stage 1 files. This is a safety net for functions the
+        # priority queue never visited but that are obviously relevant.
+        if stage1_files:
+            candidates = self._extend_with_stage1_pool(
+                graph=graph,
+                issue=issue,
+                candidates=candidates,
+                stage1_files=stage1_files,
+                top_files=extra_pool_top_files,
+                per_file=extra_pool_per_file,
+            )
+
         if not candidates:
             return []
 
@@ -96,6 +113,85 @@ class Reranker:
         return out
 
     # ---------------- internals ----------------
+
+    def _extend_with_stage1_pool(
+        self,
+        *,
+        graph: nx.MultiDiGraph,
+        issue: str,
+        candidates: list[Candidate],
+        stage1_files: list[str],
+        top_files: int,
+        per_file: int,
+    ) -> list[Candidate]:
+        """Add the top per_file functions from top top_files Stage 1 files.
+
+        Skipped silently if dense retriever unavailable. Functions already
+        present in `candidates` are NOT re-added (no duplicates). Added
+        functions get a synthetic Candidate with score=0 — Stage 5 reranker
+        will decide their final position based on the LLM judgment.
+        """
+        from ..log import info
+
+        if self.dense is None or not stage1_files:
+            return candidates
+
+        existing_ids = {c.node_id for c in candidates}
+
+        # Group function nodes by file_path for efficient lookup
+        funcs_by_file: dict[str, list[tuple[str, "any"]]] = {}
+        for nid, data in graph.nodes(data="data"):
+            if not data or data.node_type != NodeType.FUNCTION:
+                continue
+            funcs_by_file.setdefault(data.file_path, []).append((nid, data))
+
+        # Encode the issue once
+        try:
+            issue_emb = self.dense.encode([issue])[0]
+        except Exception:
+            return candidates
+
+        extra: list[Candidate] = []
+        for file_path in stage1_files[:top_files]:
+            funcs = funcs_by_file.get(file_path, [])
+            if not funcs:
+                continue
+            texts = [
+                f"{d.qualname or d.name}\n{d.docstring or ''}\n{(d.code or '')[:600]}"
+                for _, d in funcs
+            ]
+            try:
+                embs = self.dense.encode(texts)
+            except Exception:
+                continue
+            sims = embs @ issue_emb
+            order = np.argsort(-sims)
+            picked = 0
+            for i in order:
+                nid, _ = funcs[i]
+                if nid in existing_ids:
+                    continue
+                extra.append(
+                    Candidate(
+                        node_id=nid,
+                        score=0.0,
+                        chain_score=0.0,
+                        distance=0,
+                        causal_chain=[],
+                        suspect_statements=[],
+                    )
+                )
+                existing_ids.add(nid)
+                picked += 1
+                if picked >= per_file:
+                    break
+
+        if extra:
+            info(
+                f"[Stage 5] extended candidate pool: +{len(extra)} functions "
+                f"from top-{top_files} Stage 1 files"
+            )
+        return candidates + extra
 
     def _embedding_rerank(
         self, graph: nx.MultiDiGraph, issue: str, candidates: list[Candidate]

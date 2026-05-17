@@ -216,6 +216,7 @@ class HybridLocPipeline:
                 bundle.graph, symptoms,
                 issue_embedding=issue_emb,
                 stage1_candidate_files=s1.candidate_files,
+                dense=self.dense,
             )
             traverser = Traverser(
                 bundle.graph,
@@ -231,7 +232,12 @@ class HybridLocPipeline:
             cands = traverser.run(issue=issue_used, symptoms=symptoms, seeds=seeds)
             info(f"[Stage 4] Run {run_ix+1} done — termination={traverser.termination_reason}, think_calls={traverser.think_calls}, candidates={len(cands)}")
             info(f"[Stage 5] Run {run_ix+1} — reranking {len(cands)} candidates ...")
-            ranked = self.reranker.rerank(graph=bundle.graph, issue=issue_used, candidates=cands)
+            ranked = self.reranker.rerank(
+                graph=bundle.graph,
+                issue=issue_used,
+                candidates=cands,
+                stage1_files=s1.candidate_files,
+            )
             info(f"[Stage 5] Run {run_ix+1} — top candidate: {ranked[0].function_key if ranked else 'none'}")
             runs.append(ranked)
             last_termination = traverser.termination_reason
