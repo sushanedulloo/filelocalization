@@ -1,16 +1,15 @@
 """
-NVIDIA NIM client for DeepSeek-V4-Flash.
+LLM client supporting NVIDIA NIM and Groq (OpenAI-compatible endpoints).
 
-Three reasoning modes (Non-think / Think-High / Think-Max), an OpenAI-compatible
-endpoint, and a content-addressed on-disk cache so repeated runs are free.
+Provider is selected via env vars:
+  NIM  (default): NIM_API_KEY, NIM_BASE_URL, NIM_MODEL
+  Groq:           GROQ_API_KEYS (comma-separated for rotation), GROQ_MODEL
 
-The `chat_template_kwargs={"enable_thinking": True, "thinking": True}` payload
-is required by NIM to actually return reasoning tokens in the Think modes —
-this is the gotcha logged in HybridLoc_v2_plan.md §9.
+Key rotation: set multiple keys comma-separated in NIM_API_KEY or GROQ_API_KEYS.
+On RateLimitError the client automatically rotates to the next key.
 
-Synchronous .complete() and async .acomplete() / .acomplete_many() are both
-exposed; offline batched passes (e.g. the 50k per-function summary pass for
-RepoLens) should use acomplete_many with a Semaphore to stay polite.
+The `chat_template_kwargs={"enable_thinking": True}` payload is only sent to
+NIM/Qwen models that support thinking mode. Groq/Llama models skip it.
 """
 
 from __future__ import annotations
@@ -43,40 +42,58 @@ class ReasoningMode(str, Enum):
     THINK_MAX = "think-max"
 
 
-@dataclass(frozen=True)
+@dataclass
 class NIMConfig:
-    api_key: str
+    api_keys: list[str]           # one or more keys; rotated on RateLimitError
     base_url: str = "https://integrate.api.nvidia.com/v1"
     model: str = "deepseek-ai/deepseek-v4-flash"
     cache_dir: Path = field(default_factory=lambda: Path("data/nim_cache"))
     max_concurrency: int = 3
     request_timeout: float = 300.0
 
+    # back-compat: single api_key property
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[0]
+
     @classmethod
     def from_env(cls) -> "NIMConfig":
-        api_key = os.environ.get("NIM_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "NIM_API_KEY not set. Copy .env.example to .env and fill it in."
+        provider = os.environ.get("HYBRIDLOC_PROVIDER", "nim").lower()
+
+        if provider == "groq":
+            raw_keys = os.environ.get("GROQ_API_KEYS", os.environ.get("GROQ_API_KEY", ""))
+            if not raw_keys:
+                raise RuntimeError("GROQ_API_KEYS not set.")
+            keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            return cls(
+                api_keys=keys,
+                base_url="https://api.groq.com/openai/v1",
+                model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
             )
-        cache_dir = Path(
-            os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"
-        )
+
+        # default: NIM
+        raw_keys = os.environ.get("NIM_API_KEY", "")
+        if not raw_keys:
+            raise RuntimeError("NIM_API_KEY not set. Copy .env.example to .env and fill it in.")
+        keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
         return cls(
-            api_key=api_key,
-            base_url=os.environ.get("NIM_BASE_URL", cls.base_url),
+            api_keys=keys,
+            base_url=os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"),
             model=os.environ.get("NIM_MODEL", cls.model),
-            cache_dir=cache_dir,
+            cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
         )
 
 
 _THINK_KWARGS = {"enable_thinking": True, "thinking": True}
 
-# Models that reason natively (no special kwargs needed; thinking happens automatically)
+# Models that reason natively — skip enable_thinking kwargs entirely
 _NATIVE_REASONING_MODELS = {"deepseek-r1", "deepseek-ai/deepseek-r1"}
 
+# Models with NO thinking mode (Groq/OpenRouter Llama etc) — also skip kwargs
+_NO_THINKING_MODELS = {"llama", "meta-llama", "mixtral", "gemma", "mistral"}
+
 # NIM free tier: 40 RPM → enforce 38 RPM to stay safely under the limit.
-# MIN_INTERVAL = 60 / 38 ≈ 1.58 s between non-cached calls.
 _RPM_LIMIT = 38
 _MIN_INTERVAL = 60.0 / _RPM_LIMIT   # ~1.58 s
 
@@ -142,24 +159,28 @@ class _CacheStore:
 
 
 class NIMClient:
-    """Thin wrapper over the NIM OpenAI-compatible endpoint with a disk cache."""
+    """Thin wrapper over NIM / Groq OpenAI-compatible endpoints with disk cache + key rotation."""
 
     def __init__(self, config: NIMConfig | None = None):
         self.config = config or NIMConfig.from_env()
         self._cache = _CacheStore(self.config.cache_dir)
-        self._sync = OpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=self.config.request_timeout,
-        )
-        self._async = AsyncOpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=self.config.request_timeout,
-        )
+        self._key_index = 0          # current active key index
+        self._sync, self._async = self._make_clients(self.config.api_keys[0])
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
-        # rate-limiter state: track when the last real (non-cached) call was made
         self._last_call_time: float = 0.0
+
+    def _make_clients(self, api_key: str):
+        sync = OpenAI(api_key=api_key, base_url=self.config.base_url, timeout=self.config.request_timeout)
+        asyn = AsyncOpenAI(api_key=api_key, base_url=self.config.base_url, timeout=self.config.request_timeout)
+        return sync, asyn
+
+    def _rotate_key(self) -> None:
+        """Switch to the next API key in the rotation list."""
+        from ..log import info
+        self._key_index = (self._key_index + 1) % len(self.config.api_keys)
+        new_key = self.config.api_keys[self._key_index]
+        self._sync, self._async = self._make_clients(new_key)
+        info(f"[key-rotation] switched to key index {self._key_index}")
 
     # ------------- public API -------------
 
@@ -203,7 +224,8 @@ class NIMClient:
             time.sleep(_MIN_INTERVAL - elapsed)
         info(f"NIM call  mode={mode.value}  prompt={len(messages[-1]['content'])} chars")
         t0 = time.perf_counter()
-        while True:
+        n_keys = len(self.config.api_keys)
+        for attempt in range(n_keys * 3):
             try:
                 text, reasoning = self._call_sync(
                     messages=messages,
@@ -215,8 +237,11 @@ class NIMClient:
                 )
                 break
             except RateLimitError:
-                info("NIM 429 — sleeping 65s for rate-limit reset ...")
-                time.sleep(65)
+                if n_keys > 1:
+                    self._rotate_key()
+                else:
+                    info("NIM 429 — sleeping 65s for rate-limit reset ...")
+                    time.sleep(65)
         self._last_call_time = time.perf_counter()
         latency = time.perf_counter() - t0
         info(f"NIM done  latency={latency:.1f}s  response={len(text)} chars")
@@ -268,7 +293,8 @@ class NIMClient:
             if elapsed < _MIN_INTERVAL:
                 await asyncio.sleep(_MIN_INTERVAL - elapsed)
             t0 = time.perf_counter()
-            while True:
+            n_keys = len(self.config.api_keys)
+            for attempt in range(n_keys * 3):
                 try:
                     text, reasoning = await self._call_async(
                         messages=messages,
@@ -280,7 +306,10 @@ class NIMClient:
                     )
                     break
                 except RateLimitError:
-                    await asyncio.sleep(65)
+                    if n_keys > 1:
+                        self._rotate_key()
+                    else:
+                        await asyncio.sleep(65)
             self._last_call_time = time.perf_counter()
             latency = time.perf_counter() - t0
 
@@ -335,10 +364,14 @@ class NIMClient:
         return messages
 
     def _extra_body(self, mode: ReasoningMode) -> dict[str, Any]:
-        # R1 and other native-reasoning models think automatically — no kwargs needed
         if mode == ReasoningMode.NON_THINK:
             return {}
-        if any(m in self.config.model for m in _NATIVE_REASONING_MODELS):
+        model_lower = self.config.model.lower()
+        # native reasoning models think automatically — no kwargs needed
+        if any(m in model_lower for m in _NATIVE_REASONING_MODELS):
+            return {}
+        # models with no thinking mode at all (Groq/Llama etc) — skip kwargs
+        if any(m in model_lower for m in _NO_THINKING_MODELS):
             return {}
         return {"chat_template_kwargs": _THINK_KWARGS}
 
