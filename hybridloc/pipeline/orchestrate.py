@@ -268,7 +268,7 @@ def _make_concept_client(main_nim: NIMClient) -> NIMClient:
         return main_nim
     from ..llm.nim_client import NIMConfig
     cfg = NIMConfig(
-        api_key=main_nim.config.api_key,
+        api_keys=main_nim.config.api_keys,
         base_url=main_nim.config.base_url,
         model=concept_model,
         cache_dir=main_nim.config.cache_dir,
