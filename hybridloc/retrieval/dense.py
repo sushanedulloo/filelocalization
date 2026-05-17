@@ -66,38 +66,83 @@ class DenseRetriever:
         )
         return np.asarray(embs, dtype=np.float32)
 
+    def _empty_gpu_cache(self) -> None:
+        """Release PyTorch's reserved-but-unallocated GPU memory before indexing."""
+        try:
+            import torch
+            if "cuda" in str(self.device) and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def _fallback_to_cpu(self) -> None:
+        """Move the model to CPU after a GPU OOM."""
+        from ..log import warn
+        warn(f"[dense] GPU OOM — falling back to CPU for the rest of indexing")
+        self.device = "cpu"
+        if self._model is not None:
+            try:
+                self._model = self._model.to("cpu")  # type: ignore[union-attr]
+            except Exception:
+                self._model = None  # force reload on CPU
+
+    def _encode_with_oom_retry(self, batch: list[str], batch_size: int) -> np.ndarray:
+        """Encode one batch with adaptive shrinking on GPU OOM.
+
+        On OOM: clear cache, halve max_tokens_per_batch by splitting the
+        batch in half. If splits still fail at size 1, fall back to CPU.
+        """
+        try:
+            return self.encode(batch, batch_size=batch_size)
+        except Exception as e:
+            if "out of memory" not in str(e).lower() and "OutOfMemory" not in type(e).__name__:
+                raise
+            self._empty_gpu_cache()
+            if len(batch) == 1:
+                # single document still OOMs — switch to CPU and retry
+                self._fallback_to_cpu()
+                return self.encode(batch, batch_size=1)
+            # split the batch in half and recurse
+            mid = len(batch) // 2
+            left = self._encode_with_oom_retry(batch[:mid], batch_size=max(1, batch_size // 2))
+            right = self._encode_with_oom_retry(batch[mid:], batch_size=max(1, batch_size // 2))
+            return np.concatenate([left, right], axis=0)
+
     def index(
         self,
         doc_texts: list[str],
         doc_ids: list[str],
         batch_size: int = 8,
-        max_tokens_per_batch: int = 8192,
+        max_tokens_per_batch: int = 4096,
     ) -> None:
-        """Encode documents using token-bounded batching (SweRank §4.3 style).
+        """Encode documents using token-bounded batching with OOM recovery.
 
-        File text length varies a lot — batching by file count OOMs on long files.
-        We group documents until the cumulative token estimate hits the budget,
-        then flush the batch. This keeps peak GPU memory bounded regardless of
-        how many short or long files the repo has.
+        - Token-bounded batching keeps peak memory bounded regardless of file
+          length variance (SweRank §4.3 style).
+        - Clears PyTorch's reserved-but-unallocated cache before starting.
+        - On OOM mid-batch: halves the batch and retries; falls back to CPU
+          if even a single document OOMs.
         """
         if len(doc_texts) != len(doc_ids):
             raise ValueError("doc_texts and doc_ids must align")
         self._doc_ids = list(doc_ids)
 
+        # Free any reserved-but-unallocated GPU memory from earlier stages
+        self._empty_gpu_cache()
+
         chunks: list[np.ndarray] = []
         batch: list[str] = []
         batch_tokens = 0
         for text in doc_texts:
-            # cheap whitespace-token estimate; bi-encoder tokenizer typically
-            # produces 1.3-1.5x this count, so 8192 word-tokens ≈ 12k model tokens
             text_tokens = len(text.split())
             if batch and batch_tokens + text_tokens > max_tokens_per_batch:
-                chunks.append(self.encode(batch, batch_size=batch_size))
+                chunks.append(self._encode_with_oom_retry(batch, batch_size=batch_size))
+                self._empty_gpu_cache()  # release between batches
                 batch, batch_tokens = [], 0
             batch.append(text)
             batch_tokens += text_tokens
         if batch:
-            chunks.append(self.encode(batch, batch_size=batch_size))
+            chunks.append(self._encode_with_oom_retry(batch, batch_size=batch_size))
 
         self._doc_emb = (
             np.concatenate(chunks, axis=0)
