@@ -35,7 +35,8 @@ REPOS=(
 
 OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1:8b}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
-OLLAMA_GPU="${CUDA_VISIBLE_DEVICES:-0}"   # set CUDA_VISIBLE_DEVICES=1 to use GPU 1
+# OLLAMA_GPU is auto-picked below (most free memory) unless CUDA_VISIBLE_DEVICES is preset.
+MIN_FREE_MB="${MIN_FREE_MB:-6000}"        # require at least 6 GB free
 
 OVERNIGHT_LOG_DIR="logs/overnight"
 RESULTS_DIR="results/overnight"
@@ -44,6 +45,68 @@ RESULTS_DIR="results/overnight"
 
 log()  { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 fail() { log "ERROR: $*"; exit 1; }
+
+pick_gpu() {
+  # Pick the two GPUs with the most free memory:
+  #   OLLAMA_GPU       — for Ollama serving llama-3.1-8b (~5-8 GB)
+  #   EMBED_GPU        — for CodeRankEmbed dense retriever (~600 MB)
+  # If only one GPU has enough free memory, both use the same one.
+  # Honors CUDA_VISIBLE_DEVICES if user set it (then both use that GPU).
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    log "Using preset CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    OLLAMA_GPU="${CUDA_VISIBLE_DEVICES}"
+    EMBED_GPU="${CUDA_VISIBLE_DEVICES}"
+    return
+  fi
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    log "nvidia-smi not found; defaulting to GPU 0"
+    OLLAMA_GPU=0
+    EMBED_GPU=0
+    return
+  fi
+
+  # Collect (index, free_mib) pairs into parallel arrays
+  local -a idxs=() frees=()
+  while IFS=',' read -r idx free; do
+    idx="${idx// /}"
+    free="${free// /}"
+    [ -z "$idx" ] && continue
+    idxs+=("$idx")
+    frees+=("$free")
+  done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits)
+
+  # Sort by free memory descending (simple insertion sort, list is small)
+  local n=${#idxs[@]}
+  local i j
+  for ((i=1; i<n; i++)); do
+    local key_idx=${idxs[i]}
+    local key_free=${frees[i]}
+    j=$((i-1))
+    while [ $j -ge 0 ] && [ "${frees[j]}" -lt "$key_free" ]; do
+      idxs[$((j+1))]=${idxs[j]}
+      frees[$((j+1))]=${frees[j]}
+      j=$((j-1))
+    done
+    idxs[$((j+1))]=$key_idx
+    frees[$((j+1))]=$key_free
+  done
+
+  OLLAMA_GPU="${idxs[0]}"
+  local ollama_free="${frees[0]}"
+  if [ "$ollama_free" -lt "$MIN_FREE_MB" ]; then
+    log "Warning: best GPU (${OLLAMA_GPU}) has only ${ollama_free} MiB free; need ${MIN_FREE_MB} MiB"
+    log "Continuing anyway — Ollama may fall back to CPU or fail"
+  fi
+  log "Ollama → GPU ${OLLAMA_GPU} (${ollama_free} MiB free)"
+
+  if [ "$n" -gt 1 ] && [ "${frees[1]}" -ge 2000 ]; then
+    EMBED_GPU="${idxs[1]}"
+    log "Dense retriever → GPU ${EMBED_GPU} (${frees[1]} MiB free)"
+  else
+    EMBED_GPU="$OLLAMA_GPU"
+    log "Dense retriever → GPU ${EMBED_GPU} (shared with Ollama)"
+  fi
+}
 
 verify_env() {
   [ -f .env ] || fail ".env file not found. Run from repo root."
@@ -121,7 +184,11 @@ cd "$(dirname "$0")/.."   # cd to repo root
 mkdir -p "${OVERNIGHT_LOG_DIR}" "${RESULTS_DIR}" data/graphs data/nim_cache
 
 verify_env
+pick_gpu
 ensure_ollama
+
+# Tell the Python pipeline which GPU to use for the dense retriever
+export HYBRIDLOC_EMBED_DEVICE="cuda:${EMBED_GPU}"
 
 log ""
 log "================================================================"
