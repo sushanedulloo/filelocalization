@@ -97,9 +97,24 @@ class PreFilter:
         ids = [s.file_path for s in skels]
         texts = [s.as_compact_text() for s in skels]
 
+        # Decide architecture based on repo size FIRST, so we can request
+        # bigger retriever top-K when pre-filter mode is needed.
+        # Threshold = 5x llm_max_outline_chars (default 3M chars). Below
+        # this, truncation still leaves a usable fraction of files visible
+        # to the LLM. Django at 1.8M used fusion mode successfully — the
+        # correct file was in the 614 visible files. Pre-filter only kicks
+        # in for genuinely huge repos where truncation drops most files.
+        total_outline = sum(len(s.as_compact_text()) + 2 for s in skels)
+        large_repo = total_outline > 5 * self.llm_max_outline_chars
+
+        # In pre-filter mode we need a wider BM25/Dense pool so BM25's misses
+        # don't cost us the gold file. In fusion mode the LLM sees the full
+        # outline anyway, so the smaller per_retriever_k is fine.
+        retriever_k = 100 if large_repo else self.per_retriever_k
+
         # 1) BM25
         bm25 = BM25Retriever(texts, ids)
-        bm25_top = bm25.query(issue, top_k=self.per_retriever_k)
+        bm25_top = bm25.query(issue, top_k=retriever_k)
 
         # 2) Dense (optional — skipped if no model wired or HYBRIDLOC_SKIP_DENSE=1)
         import os
@@ -107,23 +122,17 @@ class PreFilter:
         if self.dense is not None and os.environ.get("HYBRIDLOC_SKIP_DENSE", "0") != "1":
             try:
                 self.dense.index(texts, ids)
-                dense_top = self.dense.query(issue, top_k=self.per_retriever_k)
+                dense_top = self.dense.query(issue, top_k=retriever_k)
             except Exception as e:
                 notes.append(f"dense retriever failed: {e!r}")
 
-        # 3) Decide architecture based on repo size
-        # If the full outline would be truncated, switch to Agentless-style
-        # pre-filter: BM25/Dense select the candidate pool, LLM ranks within it.
-        total_outline = sum(len(s.as_compact_text()) + 2 for s in skels)
-        large_repo = total_outline > self.llm_max_outline_chars
-
         llm_top: list[tuple[str, str]] = []
         if large_repo and self.nim is not None:
-            # PRE-FILTER MODE — BM25 ∪ Dense → ~50 candidates → LLM ranks those
+            # PRE-FILTER MODE — BM25 ∪ Dense → ~150 candidates → LLM ranks those
             pool_paths: list[str] = []
             seen: set[str] = set()
             for src in (bm25_top, dense_top):
-                for p, _ in src[:30]:
+                for p, _ in src[:retriever_k]:
                     if p not in seen:
                         seen.add(p)
                         pool_paths.append(p)
