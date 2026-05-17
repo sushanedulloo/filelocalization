@@ -63,15 +63,18 @@ class HybridLocRunner:
         *,
         limit: int | None = None,
         only_repos: set[str] | None = None,
+        extra_filters: list | None = None,
     ) -> tuple[list[Prediction], list[Gold]]:
         ds = load_verified()
         preds: list[Prediction] = []
         golds: list[Gold] = []
 
-        for inst in tqdm(ds, total=len(ds) if limit is None else min(limit, len(ds))):
+        for inst in tqdm(ds):
             if limit is not None and len(preds) >= limit:
                 break
             if only_repos and inst["repo"] not in only_repos:
+                continue
+            if extra_filters and not all(f(inst) for f in extra_filters):
                 continue
 
             instance_id = inst["instance_id"]
