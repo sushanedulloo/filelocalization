@@ -34,16 +34,24 @@ cp .env.example .env
 
 Concept extraction takes hours per repo. We've already done it for all 12 SWE-bench Verified repos and cached the graphs. Pull them from HuggingFace Hub:
 
-```python
-from huggingface_hub import snapshot_download
-snapshot_download(
-    "sushanedulloo/hybridloc-cache",   # ← the dataset I'll publish
-    repo_type="dataset",
-    local_dir="data/",
-)
+```bash
+# one-time setup
+pip install huggingface_hub
+huggingface-cli login   # if the dataset is private
+export HF_REPO_ID=sushanedulloo/hybridloc-cache   # or set in .env
+
+# restore the cache into data/graphs/
+python scripts/restore_cache.py
 ```
 
 After this, `data/graphs/` will have one `.pkl` per repo. Stage 2 (the slow part) is skipped automatically.
+
+To publish your own cached graphs (after running the overnight pipeline):
+
+```bash
+export HF_REPO_ID=yourname/hybridloc-cache
+python scripts/upload_cache.py
+```
 
 ### Using the API
 
