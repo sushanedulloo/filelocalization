@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from tqdm import tqdm
-from hybridloc.log import info, warn
+from hybridloc.log import info, instance_log, warn
 
 from hybridloc.pipeline.orchestrate import HybridLocPipeline, PipelineResult
 
@@ -79,51 +79,52 @@ class HybridLocRunner:
 
             instance_id = inst["instance_id"]
             info(f"━━━ [{len(preds)+1}] {instance_id} ━━━")
-            try:
-                info(f"Cloning {inst['repo']} @ {inst['base_commit'][:12]} ...")
-                repo_path = clone_at(
-                    inst["repo"], inst["base_commit"], repos_root=self.repos_root
-                )
-                bcd = base_commit_date(repo_path, inst["base_commit"])
-                cache_key = (
-                    f"{inst['repo'].replace('/', '__')}__{inst['base_commit'][:12]}.pkl"
-                )
-                bundle = self.pipeline.build_index(
-                    repo_root=repo_path,
-                    base_commit_sha=inst["base_commit"],
-                    base_commit_date=bcd,
-                    cache_path=self.cache_root / cache_key,
-                )
-                pr = self.pipeline.localize(
-                    issue=inst["problem_statement"],
-                    bundle=bundle,
-                    repo_root=repo_path,
-                    instance_id=instance_id,
-                )
-                pred = to_prediction(pr)
-                preds.append(pred)
-
-                gl = extract_gold_for_instance(
-                    patch_text=inst["patch"],
-                    repo_path=repo_path,
-                    base_commit=inst["base_commit"],
-                )
-                gold = to_gold(instance_id, gl)
-                info(f"[gold] files={gl.files}  functions={gl.functions}")
-                info(f"[pred] top-5 funcs={pred.functions[:5]}")
-                golds.append(gold)
-            except Exception as e:
-                warn(f"FAILED {instance_id}: {type(e).__name__}: {e}")
-                preds.append(
-                    Prediction(
-                        instance_id=instance_id,
-                        files=[],
-                        functions=[],
-                        lines=[],
-                        confidences=[],
+            with instance_log(instance_id):
+                try:
+                    info(f"Cloning {inst['repo']} @ {inst['base_commit'][:12]} ...")
+                    repo_path = clone_at(
+                        inst["repo"], inst["base_commit"], repos_root=self.repos_root
                     )
-                )
-                golds.append(Gold(instance_id=instance_id, files=set(), functions=set(), line_ranges=[]))
-                print(f"[runner] {instance_id}: {type(e).__name__}: {e}")
+                    bcd = base_commit_date(repo_path, inst["base_commit"])
+                    cache_key = (
+                        f"{inst['repo'].replace('/', '__')}__{inst['base_commit'][:12]}.pkl"
+                    )
+                    bundle = self.pipeline.build_index(
+                        repo_root=repo_path,
+                        base_commit_sha=inst["base_commit"],
+                        base_commit_date=bcd,
+                        cache_path=self.cache_root / cache_key,
+                    )
+                    pr = self.pipeline.localize(
+                        issue=inst["problem_statement"],
+                        bundle=bundle,
+                        repo_root=repo_path,
+                        instance_id=instance_id,
+                    )
+                    pred = to_prediction(pr)
+                    preds.append(pred)
+
+                    gl = extract_gold_for_instance(
+                        patch_text=inst["patch"],
+                        repo_path=repo_path,
+                        base_commit=inst["base_commit"],
+                    )
+                    gold = to_gold(instance_id, gl)
+                    info(f"[gold] files={gl.files}  functions={gl.functions}")
+                    info(f"[pred] top-5 funcs={pred.functions[:5]}")
+                    golds.append(gold)
+                except Exception as e:
+                    warn(f"FAILED {instance_id}: {type(e).__name__}: {e}")
+                    preds.append(
+                        Prediction(
+                            instance_id=instance_id,
+                            files=[],
+                            functions=[],
+                            lines=[],
+                            confidences=[],
+                        )
+                    )
+                    golds.append(Gold(instance_id=instance_id, files=set(), functions=set(), line_ranges=[]))
+                    print(f"[runner] {instance_id}: {type(e).__name__}: {e}")
 
         return preds, golds
