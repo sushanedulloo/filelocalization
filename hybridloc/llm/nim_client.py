@@ -50,6 +50,7 @@ class NIMConfig:
     cache_dir: Path = field(default_factory=lambda: Path("data/nim_cache"))
     max_concurrency: int = 3
     request_timeout: float = 300.0
+    rpm_limit: int = 38           # requests per minute; auto-set per endpoint below
 
     # back-compat: single api_key property
     @property
@@ -65,11 +66,13 @@ class NIMConfig:
             if not raw_keys:
                 raise RuntimeError("GROQ_API_KEYS not set.")
             keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            base_url = "https://api.groq.com/openai/v1"
             return cls(
                 api_keys=keys,
-                base_url="https://api.groq.com/openai/v1",
+                base_url=base_url,
                 model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
                 cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
+                rpm_limit=_auto_rpm(base_url),
             )
 
         # default: NIM
@@ -77,11 +80,13 @@ class NIMConfig:
         if not raw_keys:
             raise RuntimeError("NIM_API_KEY not set. Copy .env.example to .env and fill it in.")
         keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
         return cls(
             api_keys=keys,
-            base_url=os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+            base_url=base_url,
             model=os.environ.get("NIM_MODEL", cls.model),
             cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
+            rpm_limit=_auto_rpm(base_url),
         )
 
 
@@ -93,9 +98,22 @@ _NATIVE_REASONING_MODELS = {"deepseek-r1", "deepseek-ai/deepseek-r1"}
 # Models with NO thinking mode (Groq/OpenRouter Llama etc) — also skip kwargs
 _NO_THINKING_MODELS = {"llama", "meta-llama", "mixtral", "gemma", "mistral"}
 
-# NIM free tier: 40 RPM → enforce 38 RPM to stay safely under the limit.
-_RPM_LIMIT = 38
-_MIN_INTERVAL = 60.0 / _RPM_LIMIT   # ~1.58 s
+# Default RPM per endpoint kind. Local endpoints don't need throttling.
+_NIM_CLOUD_RPM = 38           # NIM free tier limit is 40, stay safely under
+_GROQ_RPM = 28                # Groq free tier is 30 RPM for llama-8b, stay under
+_LOCAL_RPM = 6000             # Ollama / vLLM / etc. — effectively unthrottled (10/s)
+
+
+def _auto_rpm(base_url: str) -> int:
+    """Pick a sensible RPM based on endpoint. Local endpoints get no throttling."""
+    if not base_url:
+        return _NIM_CLOUD_RPM
+    u = base_url.lower()
+    if "localhost" in u or "127.0.0.1" in u or "0.0.0.0" in u:
+        return _LOCAL_RPM
+    if "groq.com" in u:
+        return _GROQ_RPM
+    return _NIM_CLOUD_RPM
 
 
 def _cache_key(
@@ -168,6 +186,9 @@ class NIMClient:
         self._sync, self._async = self._make_clients(self.config.api_keys[0])
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._last_call_time: float = 0.0
+        # Per-endpoint rate limit. Local endpoints (Ollama, vLLM) get
+        # essentially no throttle; NIM/Groq cloud keep their free-tier limits.
+        self._min_interval: float = 60.0 / max(1, self.config.rpm_limit)
 
     def _make_clients(self, api_key: str):
         sync = OpenAI(api_key=api_key, base_url=self.config.base_url, timeout=self.config.request_timeout)
@@ -218,10 +239,10 @@ class NIMClient:
             )
 
         from ..log import info
-        # enforce 38 RPM rate limit
+        # enforce per-endpoint rate limit (NIM=38 RPM, Groq=28 RPM, local=unthrottled)
         elapsed = time.perf_counter() - self._last_call_time
-        if elapsed < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - elapsed)
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
         info(f"NIM call  mode={mode.value}  prompt={len(messages[-1]['content'])} chars")
         t0 = time.perf_counter()
         n_keys = len(self.config.api_keys)
@@ -288,10 +309,10 @@ class NIMClient:
             )
 
         async with self._semaphore:
-            # enforce 38 RPM
+            # enforce per-endpoint rate limit
             elapsed = time.perf_counter() - self._last_call_time
-            if elapsed < _MIN_INTERVAL:
-                await asyncio.sleep(_MIN_INTERVAL - elapsed)
+            if elapsed < self._min_interval:
+                await asyncio.sleep(self._min_interval - elapsed)
             t0 = time.perf_counter()
             n_keys = len(self.config.api_keys)
             for attempt in range(n_keys * 3):
