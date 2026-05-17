@@ -28,6 +28,7 @@ dependencies = [
   "transformers==4.44.2",
   "sentence-transformers==3.0.1",
   "accelerate==0.33.0",
+  "einops>=0.8,<1.0",
 
   # Static analysis
   "jedi==0.19.1",

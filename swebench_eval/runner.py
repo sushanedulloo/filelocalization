@@ -97,14 +97,18 @@ class HybridLocRunner:
                     repo_root=repo_path,
                     instance_id=instance_id,
                 )
-                preds.append(to_prediction(pr))
+                pred = to_prediction(pr)
+                preds.append(pred)
 
                 gl = extract_gold_for_instance(
                     patch_text=inst["patch"],
                     repo_path=repo_path,
                     base_commit=inst["base_commit"],
                 )
-                golds.append(to_gold(instance_id, gl))
+                gold = to_gold(instance_id, gl)
+                info(f"[gold] files={gl.files}  functions={gl.functions}")
+                info(f"[pred] top-5 funcs={pred.functions[:5]}")
+                golds.append(gold)
             except Exception as e:
                 warn(f"FAILED {instance_id}: {type(e).__name__}: {e}")
                 preds.append(

@@ -66,11 +66,16 @@ class DenseRetriever:
         )
         return np.asarray(embs, dtype=np.float32)
 
-    def index(self, doc_texts: list[str], doc_ids: list[str], batch_size: int = 32) -> None:
+    def index(self, doc_texts: list[str], doc_ids: list[str], batch_size: int = 32, chunk_size: int = 50) -> None:
+        """Encode documents in chunks to avoid GPU OOM on large repos."""
         if len(doc_texts) != len(doc_ids):
             raise ValueError("doc_texts and doc_ids must align")
         self._doc_ids = list(doc_ids)
-        self._doc_emb = self.encode(doc_texts, batch_size=batch_size)
+        chunks = []
+        for start in range(0, len(doc_texts), chunk_size):
+            chunk = doc_texts[start : start + chunk_size]
+            chunks.append(self.encode(chunk, batch_size=batch_size))
+        self._doc_emb = np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.float32)
 
     def query(self, q: str, top_k: int = 20) -> list[tuple[str, float]]:
         if self._doc_emb is None:
