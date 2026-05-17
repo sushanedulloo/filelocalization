@@ -11,6 +11,11 @@ Reason from symptom keywords, named APIs, stack-frame paths if any, and
 behavioral cues. Prefer files whose contents (not just names) plausibly
 implement the affected behavior.
 
+IMPORTANT: Prefer implementation files (e.g. `<pkg>/core/*.py`, `<pkg>/utils/*.py`)
+over test files (`tests/*`, `*_test.py`, `test_*.py`). Only rank a test file
+highly if the issue explicitly asks for tests to be added or modified, or if
+the test itself contains the bug being reported.
+
 Return ONLY a JSON object of the form:
 {{
   "files": [

@@ -66,16 +66,44 @@ class DenseRetriever:
         )
         return np.asarray(embs, dtype=np.float32)
 
-    def index(self, doc_texts: list[str], doc_ids: list[str], batch_size: int = 8, chunk_size: int = 20) -> None:
-        """Encode documents in chunks to avoid GPU OOM on large repos."""
+    def index(
+        self,
+        doc_texts: list[str],
+        doc_ids: list[str],
+        batch_size: int = 8,
+        max_tokens_per_batch: int = 8192,
+    ) -> None:
+        """Encode documents using token-bounded batching (SweRank §4.3 style).
+
+        File text length varies a lot — batching by file count OOMs on long files.
+        We group documents until the cumulative token estimate hits the budget,
+        then flush the batch. This keeps peak GPU memory bounded regardless of
+        how many short or long files the repo has.
+        """
         if len(doc_texts) != len(doc_ids):
             raise ValueError("doc_texts and doc_ids must align")
         self._doc_ids = list(doc_ids)
-        chunks = []
-        for start in range(0, len(doc_texts), chunk_size):
-            chunk = doc_texts[start : start + chunk_size]
-            chunks.append(self.encode(chunk, batch_size=batch_size))
-        self._doc_emb = np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.float32)
+
+        chunks: list[np.ndarray] = []
+        batch: list[str] = []
+        batch_tokens = 0
+        for text in doc_texts:
+            # cheap whitespace-token estimate; bi-encoder tokenizer typically
+            # produces 1.3-1.5x this count, so 8192 word-tokens ≈ 12k model tokens
+            text_tokens = len(text.split())
+            if batch and batch_tokens + text_tokens > max_tokens_per_batch:
+                chunks.append(self.encode(batch, batch_size=batch_size))
+                batch, batch_tokens = [], 0
+            batch.append(text)
+            batch_tokens += text_tokens
+        if batch:
+            chunks.append(self.encode(batch, batch_size=batch_size))
+
+        self._doc_emb = (
+            np.concatenate(chunks, axis=0)
+            if chunks
+            else np.empty((0,), dtype=np.float32)
+        )
 
     def query(self, q: str, top_k: int = 20) -> list[tuple[str, float]]:
         if self._doc_emb is None:

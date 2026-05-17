@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
 
 import networkx as nx
@@ -15,7 +17,7 @@ from .nodes import EdgeType, NodeType, fid_concept, fid_function, fid_symptom
 class Seed:
     node_id: str
     prior: float
-    provenance: str    # "stack" | "literal" | "concept" | "memory"
+    provenance: str    # "stack" | "literal" | "concept" | "memory" | "stage1"
 
 
 # Priors from HybridLoc_v2_plan.md §5.4
@@ -26,6 +28,26 @@ PRIORS = {
     "memory": 0.4,
     "stage1": 0.3,
 }
+
+# LocAgent-style soft penalty for test files. They still seed if LLM ranked
+# them highly, but cannot dominate when implementation files are available.
+_TEST_FILE_PENALTY = 0.5
+_TEST_FILE_RE = re.compile(
+    r"(^|/)tests?/"          # any /tests/ or /test/ directory
+    r"|(/|^)tests?\.py$"     # files literally named tests.py or test.py
+    r"|(/|^)test_[^/]*\.py$" # test_*.py
+    r"|_test\.py$"           # *_test.py
+)
+
+
+def _is_test_file(path: str) -> bool:
+    return bool(_TEST_FILE_RE.search(path or ""))
+
+
+def _seeds_per_file_budget(rank: int) -> int:
+    """Rank-decayed allocation: top files get more seeds, but no monopoly.
+    Rank 0→8, 1→5, 2→4, 3→3, 4+→2. Caps any single file's contribution."""
+    return max(2, math.ceil(8 * math.exp(-0.4 * rank)))
 
 
 def build_seed_set(
@@ -94,20 +116,46 @@ def build_seed_set(
                 if g.nodes[v].get("data") and g.nodes[v]["data"].node_type == NodeType.FUNCTION:
                     _add(v, PRIORS["concept"], "concept")
 
-    # 4) Stage 1 fallback seeds — add functions from candidate files with rank-weighted priors
-    # Top-ranked files get higher prior so they dominate the seed cap.
+    # 4) Stage 1 fallback seeds — rank-weighted prior with PER-FILE budget.
+    # Prevents one file (e.g. a test file with 30 methods) from monopolizing the seed cap.
+    # Test files get a soft penalty so they don't dominate implementation files.
     if stage1_candidate_files:
         n_files = len(stage1_candidate_files)
         rank_map = {f: i for i, f in enumerate(stage1_candidate_files)}
+
+        # group function nodes by file_path
+        funcs_by_file: dict[str, list[tuple[str, "any"]]] = {}
         for nid, data in g.nodes(data="data"):
             if not data or data.node_type != NodeType.FUNCTION:
                 continue
-            rank = rank_map.get(data.file_path)
-            if rank is None:
-                continue
-            # prior decays from 0.35 (rank 0) to 0.15 (last rank)
-            prior = 0.35 - 0.20 * (rank / max(1, n_files - 1))
-            _add(nid, prior, "stage1")
+            if data.file_path in rank_map:
+                funcs_by_file.setdefault(data.file_path, []).append((nid, data))
+
+        # for each file, score each function vs issue (if embedding available) so
+        # we pick the file's MOST relevant N functions, not arbitrary ones
+        for file_path, funcs in funcs_by_file.items():
+            rank = rank_map[file_path]
+            budget = _seeds_per_file_budget(rank)
+            base_prior = 0.35 - 0.20 * (rank / max(1, n_files - 1))
+            if _is_test_file(file_path):
+                base_prior *= _TEST_FILE_PENALTY
+
+            # rank this file's functions: by issue embedding similarity if available,
+            # else fall back to declaration order
+            if issue_embedding is not None:
+                def _sim(item):
+                    _, d = item
+                    centroid = (d.extra or {}).get("centroid")
+                    if centroid is None:
+                        return 0.0
+                    c = np.asarray(centroid, dtype=np.float32)
+                    return float(np.dot(c, issue_embedding))
+                ranked_funcs = sorted(funcs, key=_sim, reverse=True)
+            else:
+                ranked_funcs = funcs
+
+            for nid, _ in ranked_funcs[:budget]:
+                _add(nid, base_prior, "stage1")
 
     # cap by prior
     ordered = sorted(seeds.values(), key=lambda s: -s.prior)

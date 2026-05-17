@@ -93,18 +93,34 @@ class PreFilter:
             except Exception as e:
                 notes.append(f"llm rank failed: {e!r}")
 
-        # union, preserving the order of first appearance
+        # Research-backed merge (Agentless / LocAgent style):
+        # BM25 and Dense are *pre-filters* that widen the candidate pool for
+        # recall. The LLM is the *primary ranker* — its order is the final order.
+        # Files found only by BM25/Dense (not by LLM) are appended at the end so
+        # they still appear in top-K for recall, but never override LLM ordering.
         seen: set[str] = set()
         merged: list[str] = []
-        # interleave so all retrievers get representation in the top
-        max_len = max(len(bm25_top), len(dense_top), len(llm_top))
-        for i in range(max_len):
-            for src in (bm25_top, dense_top, llm_top):
-                if i < len(src):
-                    p = src[i][0]
-                    if p not in seen:
-                        seen.add(p)
-                        merged.append(p)
+        # 1) LLM order first (primary ranker)
+        for p, _ in llm_top:
+            if p not in seen:
+                seen.add(p)
+                merged.append(p)
+        # 2) BM25 results not already included (recall booster)
+        for p, _ in bm25_top:
+            if p not in seen:
+                seen.add(p)
+                merged.append(p)
+        # 3) Dense results not already included
+        for p, _ in dense_top:
+            if p not in seen:
+                seen.add(p)
+                merged.append(p)
+        # Fallback: if LLM call failed and merged is empty, fall back to BM25
+        if not merged:
+            for p, _ in bm25_top + dense_top:
+                if p not in seen:
+                    seen.add(p)
+                    merged.append(p)
 
         from ..log import info
         result = Stage1Result(
