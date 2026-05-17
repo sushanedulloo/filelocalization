@@ -355,24 +355,32 @@ class NIMClient:
         from ..log import info
         from tqdm import tqdm
         prompt_list = list(prompts)
-        results: list[NIMResponse] = []
-        cached_count = 0
         bar = tqdm(total=len(prompt_list), desc=desc, unit="call", dynamic_ncols=True)
-        for i, p in enumerate(prompt_list):
+        cached_count = 0
+        completed = 0
+
+        async def _run(idx: int, p: str) -> tuple[int, NIMResponse]:
             r = await self.acomplete(p, mode=mode, system=system, temperature=temperature)
-            results.append(r)
+            return idx, r
+
+        tasks = [asyncio.create_task(_run(i, p)) for i, p in enumerate(prompt_list)]
+        results: list[NIMResponse | None] = [None] * len(prompt_list)
+        for fut in asyncio.as_completed(tasks):
+            idx, r = await fut
+            results[idx] = r
             if r.cached:
                 cached_count += 1
+            completed += 1
             bar.update(1)
-            bar.set_postfix(cached=cached_count, live=i+1-cached_count, latency=f"{r.latency_s:.1f}s")
-            if i % 10 == 0 or i == len(prompt_list) - 1:
+            bar.set_postfix(cached=cached_count, live=completed - cached_count, latency=f"{r.latency_s:.1f}s")
+            if completed % 50 == 0 or completed == len(prompt_list):
                 info(
-                    f"  [{desc}] {i+1}/{len(prompt_list)} "
-                    f"| cached={cached_count} live={i+1-cached_count} "
+                    f"  [{desc}] {completed}/{len(prompt_list)} "
+                    f"| cached={cached_count} live={completed - cached_count} "
                     f"| last_latency={r.latency_s:.1f}s"
                 )
         bar.close()
-        return results
+        return [r for r in results if r is not None]
 
     # ------------- internals -------------
 
