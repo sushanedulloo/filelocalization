@@ -267,22 +267,50 @@ class HybridLocPipeline:
 
 
 def _make_concept_client(main_nim: NIMClient) -> NIMClient:
-    """Return a NIMClient using NIM_CONCEPT_MODEL if set, else fall back to main client."""
+    """Return a NIMClient for concept extraction (Stage 2).
+
+    Three optional env vars override the main client just for concept calls:
+      NIM_CONCEPT_MODEL      — different model (e.g. llama3.1:8b)
+      NIM_CONCEPT_BASE_URL   — different endpoint (e.g. http://localhost:11434/v1)
+      NIM_CONCEPT_API_KEY    — different API key (e.g. "ollama")
+
+    Each falls back to the main client's value if not set. This lets you run
+    concept extraction on a fast local Ollama server (or Groq/OpenRouter)
+    while keeping the main pipeline on NIM cloud with thinking-mode Qwen.
+    """
     import os
     concept_model = os.environ.get("NIM_CONCEPT_MODEL", "").strip()
-    if not concept_model or concept_model == main_nim.config.model:
+    concept_base_url = os.environ.get("NIM_CONCEPT_BASE_URL", "").strip()
+    concept_api_key = os.environ.get("NIM_CONCEPT_API_KEY", "").strip()
+
+    # If no overrides at all, reuse the main client (current behaviour)
+    if not concept_model and not concept_base_url and not concept_api_key:
         return main_nim
+    # If only model override and it matches main, also reuse
+    if (concept_model == main_nim.config.model
+            and not concept_base_url
+            and not concept_api_key):
+        return main_nim
+
     from ..llm.nim_client import NIMConfig
+    api_keys = (
+        [k.strip() for k in concept_api_key.split(",") if k.strip()]
+        if concept_api_key
+        else main_nim.config.api_keys
+    )
     cfg = NIMConfig(
-        api_keys=main_nim.config.api_keys,
-        base_url=main_nim.config.base_url,
-        model=concept_model,
+        api_keys=api_keys,
+        base_url=concept_base_url or main_nim.config.base_url,
+        model=concept_model or main_nim.config.model,
         cache_dir=main_nim.config.cache_dir,
         max_concurrency=main_nim.config.max_concurrency,
         request_timeout=main_nim.config.request_timeout,
     )
     from ..log import info
-    info(f"[Stage 2] Using concept model: {concept_model}")
+    info(
+        f"[Stage 2] Using concept client: model={cfg.model}  "
+        f"base_url={cfg.base_url}"
+    )
     return NIMClient(cfg)
 
 
