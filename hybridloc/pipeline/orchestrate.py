@@ -89,6 +89,7 @@ class HybridLocPipeline:
         base_commit_date=None,
         cache_path: Path | None = None,
     ) -> IndexBundle:
+        # 1) Local cache hit
         if cache_path and cache_path.exists():
             graph = load_graph(cache_path)
             from ..parsing.skeleton import load_skeletons
@@ -96,6 +97,16 @@ class HybridLocPipeline:
             sk_path = cache_path.with_suffix(".skeletons.jsonl")
             skels = load_skeletons(sk_path) if sk_path.exists() else []
             return IndexBundle(skeletons=skels, graph=graph)
+
+        # 2) Auto-download from HF Hub if HF_REPO_ID is set
+        if cache_path is not None:
+            from ..utils.hub_cache import try_download_graph
+            if try_download_graph(cache_path) and cache_path.exists():
+                graph = load_graph(cache_path)
+                from ..parsing.skeleton import load_skeletons
+                sk_path = cache_path.with_suffix(".skeletons.jsonl")
+                skels = load_skeletons(sk_path) if sk_path.exists() else []
+                return IndexBundle(skeletons=skels, graph=graph)
 
         from ..parsing.skeleton import build_repo_skeleton, save_skeletons
 
