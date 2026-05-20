@@ -12,6 +12,7 @@ This is the heart of HybridLoc. The traversal:
 from __future__ import annotations
 
 import heapq
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -192,13 +193,21 @@ class Traverser:
             return -1.0
         # semantic
         sem = self._semantic_score(nid, data)
-        # chain
+        # chain — with distal-cause boost (GraphLocator §4.3): functions
+        # deeper in the causal chain (further from the symptom) get
+        # multiplied. A function at chain depth 3 is more often the
+        # actual edit site than one at chain depth 1, which usually
+        # describes the symptom rather than the root cause.
         cand = self._candidates.get(nid)
         chain_score = 0.0
         if cand and cand.chain_iter >= 0:
             age = self._iter - cand.chain_iter
             decay = max(0.0, 1.0 - age / max(1, self.cfg.chain_decay_iterations))
-            chain_score = (cand.chain_score / 10.0) * decay
+            base = (cand.chain_score / 10.0) * decay
+            # distal-cause multiplier (GraphLocator §4.3)
+            chain_len = len(cand.causal_chain) if cand.causal_chain else 1
+            distal_boost = 1.0 + 0.30 * math.log(max(1, chain_len))
+            chain_score = base * distal_boost
         # recency: just-added actions decay slightly
         recency = max(0.0, 1.0 - (self._iter - action.iteration_added) / 5.0)
         # depth penalty
