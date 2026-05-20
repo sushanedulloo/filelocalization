@@ -416,20 +416,21 @@ class Traverser:
                     )
                 )
 
-        # boosted exploration suggestions
+        # boosted exploration suggestions — lenient key resolution because
+        # the causal LLM often produces names with module prefixes or class
+        # names that don't exactly match our qualname format.
         for k in update.next_to_explore:
-            nid = self._function_key_to_id(k)
-            if nid is None:
-                continue
-            self._push(
-                Action(
-                    kind=ActionKind.READ_FUNCTION,
-                    target_id=nid,
-                    depth=self._distances.get(nid, 2),
-                    seed_prior=0.4,
-                    boost=0.5,
+            nids = self._resolve_function_key(k)
+            for nid in nids:
+                self._push(
+                    Action(
+                        kind=ActionKind.READ_FUNCTION,
+                        target_id=nid,
+                        depth=self._distances.get(nid, 2),
+                        seed_prior=0.55,   # raised from 0.4 — must outrank stage1 seeds (max 0.35)
+                        boost=0.6,         # raised from 0.5 — gives 1.15 effective prior
+                    )
                 )
-            )
 
     def _function_key_to_id(self, key: str) -> str | None:
         if "::" not in key:
@@ -439,6 +440,60 @@ class Traverser:
 
         nid = fid_function(path, qual)
         return nid if nid in self.g else None
+
+    def _resolve_function_key(self, key: str) -> list[str]:
+        """Lenient resolution of an LLM-suggested key like 'path::qual'.
+
+        Tries multiple variants because the LLM often produces keys that
+        don't exactly match our qualnames:
+          - "django/core/validators.py::URLValidator"  → matches __call__,
+            __init__, and any method of URLValidator
+          - "core/validators.py::URLValidator.validate" (missing django/)
+            → resolves to django/core/validators.py::URLValidator.validate
+          - "path::Class.method" where only Class exists → matches all
+            methods of that class
+
+        Returns a list of node ids (may be empty if no match).
+        """
+        from ..graph.nodes import NodeType, fid_function
+        if "::" not in key:
+            return []
+        path_raw, qual_raw = key.split("::", 1)
+        path = path_raw.lstrip("/")
+        qual = qual_raw.strip()
+
+        # Exact match
+        nid = fid_function(path, qual)
+        if nid in self.g:
+            return [nid]
+
+        results: list[str] = []
+        # Match by qualname suffix + path suffix — handles missing/extra prefix
+        for nid_iter, data in self.g.nodes(data="data"):
+            if not data or data.node_type != NodeType.FUNCTION:
+                continue
+            if not data.file_path or not data.qualname:
+                continue
+            # Path is a suffix match (e.g. "core/validators.py" matches
+            # "django/core/validators.py")
+            if not (data.file_path == path
+                    or data.file_path.endswith("/" + path)
+                    or path.endswith("/" + data.file_path)):
+                continue
+            # Qualname: exact, or "Class.method" of suggested class, or
+            # method match in suggested class
+            if data.qualname == qual:
+                results.append(nid_iter); continue
+            # If the LLM suggested just the class name, accept all methods
+            if "." not in qual and data.qualname.startswith(qual + "."):
+                results.append(nid_iter); continue
+            # If the LLM suggested "Class.method" but graph has it dotted
+            # under a different parent (rare), match the last two segments
+            qual_tail = ".".join(qual.split(".")[-2:])
+            data_tail = ".".join(data.qualname.split(".")[-2:])
+            if qual_tail == data_tail:
+                results.append(nid_iter); continue
+        return results[:5]   # cap to avoid flooding the queue
 
     def _mermaid_for_top(self, n: int) -> str:
         cands = self._top(n)
