@@ -6,9 +6,26 @@ ISSUE:
 CANDIDATES (each with a causal chain explaining why it might be the bug):
 {candidates}
 
-Task: Output a re-ordering of these candidates from most-likely the root cause
-to least-likely, with a confidence score and a verdict on whether the causal
-chain is sufficient.
+Task: For each candidate, perform a COUNTERFACTUAL analysis:
+  "If I modified ONLY this function (and nothing else in the codebase),
+   would the reported symptom go away?"
+
+Rank by edit-effectiveness, NOT by surface similarity to the issue text.
+
+Be aware of the following common failure mode:
+  - A function that USES a buggy input (e.g. calls a broken validator,
+    receives malformed data, propagates a bad value) is typically NOT the
+    fix site. It's a downstream observer of the bug.
+  - The function that PRODUCES the buggy behavior — the one whose internal
+    logic actually needs to change — is the correct edit target, even if
+    its name is more generic or it appears less prominently in the issue.
+  - Prefer the function whose internal code, if modified, would directly
+    resolve the symptom. Demote functions that merely consume or pass along
+    the problematic value.
+
+Output a re-ordering of these candidates from most-likely-to-be-edited (root
+cause) to least-likely, with a confidence score and a verdict on whether
+the causal chain is sufficient to justify editing this specific function.
 
 Return ONLY a JSON object:
 {{
