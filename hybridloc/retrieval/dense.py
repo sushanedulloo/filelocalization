@@ -30,13 +30,21 @@ class DenseRetriever:
         elif os.environ.get("HYBRIDLOC_EMBED_DEVICE"):
             self.device = os.environ["HYBRIDLOC_EMBED_DEVICE"]
         elif torch.cuda.is_available():
-            best_gpu, best_free = 0, 0
+            best_gpu, best_free = -1, 0
             for i in range(torch.cuda.device_count()):
-                free = torch.cuda.mem_get_info(i)[0]
+                # mem_get_info can raise on a GPU that's totally saturated
+                # by another process; skip those silently
+                try:
+                    free = torch.cuda.mem_get_info(i)[0]
+                except Exception:
+                    continue
                 if free > best_free:
                     best_free, best_gpu = free, i
             # only use GPU if at least 6GB free (model needs ~550MB but indexing needs more)
-            self.device = f"cuda:{best_gpu}" if best_free > 6 * 1024**3 else "cpu"
+            if best_gpu >= 0 and best_free > 6 * 1024**3:
+                self.device = f"cuda:{best_gpu}"
+            else:
+                self.device = "cpu"
         else:
             self.device = "cpu"
         self._model = None  # type: ignore[assignment]
