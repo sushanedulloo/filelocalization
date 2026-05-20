@@ -31,8 +31,12 @@ budgets:
   consistency_runs: 3
 
 retrieval:
-  bi_encoder_model: nomic-ai/CodeRankEmbed
-  bi_encoder_finetuned_path: data/embeddings/sweloc_finetuned/best.pt
+  # SweRankEmbed-Small is CodeRankEmbed fine-tuned on SweLoc (SweRank paper).
+  # Drop-in replacement: same base architecture, same embedding dim, same
+  # tokenizer family. Paper reports +13pt file MRR over pretrained
+  # CodeRankEmbed. Switching here avoids needing to fine-tune ourselves.
+  bi_encoder_model: Salesforce/SweRankEmbed-Small
+  bi_encoder_finetuned_path: null   # disabled — using the pretrained SweRank model directly
   embedding_dim: 768
   max_seq_length: 8192
 
