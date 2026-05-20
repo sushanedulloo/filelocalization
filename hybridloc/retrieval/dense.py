@@ -30,21 +30,35 @@ class DenseRetriever:
         elif os.environ.get("HYBRIDLOC_EMBED_DEVICE"):
             self.device = os.environ["HYBRIDLOC_EMBED_DEVICE"]
         elif torch.cuda.is_available():
-            best_gpu, best_free = -1, 0
+            # Rank GPUs by free memory, then probe each one in order: actually
+            # try to init CUBLAS via a tiny matmul. On shared servers a GPU can
+            # report "free" memory but be in a corrupted CUDA-context state
+            # (CUBLAS_STATUS_NOT_INITIALIZED). Skip those and try the next.
+            candidates: list[tuple[int, int]] = []
             for i in range(torch.cuda.device_count()):
-                # mem_get_info can raise on a GPU that's totally saturated
-                # by another process; skip those silently
                 try:
                     free = torch.cuda.mem_get_info(i)[0]
                 except Exception:
                     continue
-                if free > best_free:
-                    best_free, best_gpu = free, i
-            # only use GPU if at least 6GB free (model needs ~550MB but indexing needs more)
-            if best_gpu >= 0 and best_free > 6 * 1024**3:
-                self.device = f"cuda:{best_gpu}"
-            else:
-                self.device = "cpu"
+                if free > 6 * 1024**3:  # need ~6GB headroom for indexing
+                    candidates.append((i, free))
+            candidates.sort(key=lambda x: -x[1])  # most-free first
+
+            self.device = "cpu"
+            for idx, free in candidates:
+                try:
+                    with torch.cuda.device(idx):
+                        a = torch.randn(8, 8, device=f"cuda:{idx}")
+                        b = torch.randn(8, 8, device=f"cuda:{idx}")
+                        _ = (a @ b).sum().item()  # forces CUBLAS init
+                        del a, b
+                        torch.cuda.empty_cache()
+                    self.device = f"cuda:{idx}"
+                    break
+                except Exception as e:
+                    from ..log import warn
+                    warn(f"[dense] cuda:{idx} failed CUBLAS probe ({type(e).__name__}); trying next")
+                    continue
         else:
             self.device = "cpu"
         self._model = None  # type: ignore[assignment]
