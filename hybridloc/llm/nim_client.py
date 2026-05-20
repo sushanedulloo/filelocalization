@@ -184,11 +184,29 @@ class NIMClient:
         self._cache = _CacheStore(self.config.cache_dir)
         self._key_index = 0          # current active key index
         self._sync, self._async = self._make_clients(self.config.api_keys[0])
-        self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        # Lazy per-event-loop semaphore. Creating it eagerly here binds it to
+        # whatever loop happens to be running at __init__ time; if the client
+        # is reused across multiple asyncio.run() calls (e.g. build_all_graphs
+        # iterating instances), the next loop sees a "bound to a different
+        # event loop" error.
+        self._semaphore: asyncio.Semaphore | None = None
+        self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._last_call_time: float = 0.0
         # Per-endpoint rate limit. Local endpoints (Ollama, vLLM) get
         # essentially no throttle; NIM/Groq cloud keep their free-tier limits.
         self._min_interval: float = 60.0 / max(1, self.config.rpm_limit)
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Return a semaphore bound to the currently running event loop.
+
+        Re-creates if the loop has changed since last call (e.g. a new
+        asyncio.run() in a script that processes multiple instances).
+        """
+        loop = asyncio.get_running_loop()
+        if self._semaphore is None or self._semaphore_loop is not loop:
+            self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+            self._semaphore_loop = loop
+        return self._semaphore
 
     def _make_clients(self, api_key: str):
         sync = OpenAI(api_key=api_key, base_url=self.config.base_url, timeout=self.config.request_timeout)
@@ -308,7 +326,7 @@ class NIMClient:
                 cache_key=key,
             )
 
-        async with self._semaphore:
+        async with self._get_semaphore():
             # enforce per-endpoint rate limit
             elapsed = time.perf_counter() - self._last_call_time
             if elapsed < self._min_interval:
