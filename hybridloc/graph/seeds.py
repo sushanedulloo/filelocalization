@@ -132,16 +132,40 @@ def build_seed_set(
         for nid in candidates:
             _add(nid, PRIORS["stack"], "stack")
 
-    # 2) Literal matches (exception types, named APIs, behaviors): substring match
+    # 2) Literal matches (exception types, named APIs, behaviors): substring match.
+    # Normalize keys by also matching dotted suffixes — e.g. a key like
+    # "core.validators.URLValidator.validate" should also match qualname
+    # "URLValidator.validate" or class "URLValidator". This recovers anchors
+    # the symptom extractor produced with module prefixes that don't appear
+    # in our qualnames.
+    def _key_variants(k: str) -> list[str]:
+        k = k.lower().strip()
+        if not k:
+            return []
+        variants = {k}
+        parts = k.split(".")
+        # Last-two segments: "URLValidator.validate"
+        if len(parts) >= 2:
+            variants.add(".".join(parts[-2:]))
+        # Final segment alone: "validate" or "URLValidator"
+        if parts[-1]:
+            variants.add(parts[-1])
+        # Second-to-last alone (often the class name): "URLValidator"
+        if len(parts) >= 2 and parts[-2]:
+            variants.add(parts[-2])
+        return [v for v in variants if v]
+
     keys = symptoms.keywords()
-    keys_lower = [k.lower() for k in keys if k]
-    if keys_lower:
+    all_variants: set[str] = set()
+    for k in keys:
+        all_variants.update(_key_variants(k))
+    if all_variants:
         for nid, data in g.nodes(data="data"):
             if not data or data.node_type != NodeType.FUNCTION:
                 continue
             hay = (data.qualname + " " + data.docstring).lower()
-            for k in keys_lower:
-                if k and k in hay:
+            for v in all_variants:
+                if v and v in hay:
                     _add(nid, PRIORS["literal"], "literal")
                     break
 
