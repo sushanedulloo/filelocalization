@@ -303,7 +303,7 @@ def _make_concept_client(main_nim: NIMClient) -> NIMClient:
             and not concept_api_key):
         return main_nim
 
-    from ..llm.nim_client import NIMConfig, _auto_rpm
+    from ..llm.nim_client import NIMConfig, _auto_rpm, _auto_concurrency
     api_keys = (
         [k.strip() for k in concept_api_key.split(",") if k.strip()]
         if concept_api_key
@@ -315,9 +315,9 @@ def _make_concept_client(main_nim: NIMClient) -> NIMClient:
         base_url=effective_base_url,
         model=concept_model or main_nim.config.model,
         cache_dir=main_nim.config.cache_dir,
-        max_concurrency=main_nim.config.max_concurrency,
+        max_concurrency=_auto_concurrency(effective_base_url),  # per-endpoint
         request_timeout=main_nim.config.request_timeout,
-        rpm_limit=_auto_rpm(effective_base_url),  # CRITICAL: pick rpm per endpoint
+        rpm_limit=_auto_rpm(effective_base_url),  # per-endpoint
     )
     from ..log import info
     info(

@@ -1,6 +1,6 @@
 # HybridLoc v2 — SWE-bench Verified results
 
-Predictions: 10  
+Predictions: 1  
 With gold-function set: 0
 
 | Method | file_acc@1 | file_acc@5 | func_recall@5 | func_acc@5 | mrr | line_recall@5 |

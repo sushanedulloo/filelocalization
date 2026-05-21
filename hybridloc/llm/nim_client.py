@@ -73,6 +73,7 @@ class NIMConfig:
                 model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
                 cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
                 rpm_limit=_auto_rpm(base_url),
+                max_concurrency=_auto_concurrency(base_url),
             )
 
         # default: NIM
@@ -87,6 +88,7 @@ class NIMConfig:
             model=os.environ.get("NIM_MODEL", cls.model),
             cache_dir=Path(os.environ.get("HYBRIDLOC_CACHE_DIR") or "data/nim_cache"),
             rpm_limit=_auto_rpm(base_url),
+            max_concurrency=_auto_concurrency(base_url),
         )
 
 
@@ -117,6 +119,20 @@ def _auto_rpm(base_url: str) -> int:
     if "openai.com" in u:
         return _OPENAI_RPM
     return _NIM_CLOUD_RPM
+
+
+def _auto_concurrency(base_url: str) -> int:
+    """Pick concurrency based on endpoint. OpenAI tier-1 handles 50+ easily;
+    NIM/Groq free tiers are RPM-limited so high concurrency just wastes
+    connections."""
+    if not base_url:
+        return 3
+    u = base_url.lower()
+    if "localhost" in u or "127.0.0.1" in u or "0.0.0.0" in u:
+        return 16   # local Ollama; bound by GPU, not RPM
+    if "openai.com" in u:
+        return 50   # OpenAI tier-1 sustains 50+ concurrent
+    return 3        # NIM/Groq free tiers
 
 
 def _cache_key(
