@@ -96,12 +96,13 @@ _THINK_KWARGS = {"enable_thinking": True, "thinking": True}
 _NATIVE_REASONING_MODELS = {"deepseek-r1", "deepseek-ai/deepseek-r1"}
 
 # Models with NO thinking mode (Groq/OpenRouter Llama etc) — also skip kwargs
-_NO_THINKING_MODELS = {"llama", "meta-llama", "mixtral", "gemma", "mistral"}
+_NO_THINKING_MODELS = {"llama", "meta-llama", "mixtral", "gemma", "mistral", "gpt-"}
 
 # Default RPM per endpoint kind. Local endpoints don't need throttling.
 _NIM_CLOUD_RPM = 38           # NIM free tier limit is 40, stay safely under
 _GROQ_RPM = 28                # Groq free tier is 30 RPM for llama-8b, stay under
 _LOCAL_RPM = 6000             # Ollama / vLLM / etc. — effectively unthrottled (10/s)
+_OPENAI_RPM = 450             # tier-1 gpt-4o-mini is 500 RPM, stay under
 
 
 def _auto_rpm(base_url: str) -> int:
@@ -113,6 +114,8 @@ def _auto_rpm(base_url: str) -> int:
         return _LOCAL_RPM
     if "groq.com" in u:
         return _GROQ_RPM
+    if "openai.com" in u:
+        return _OPENAI_RPM
     return _NIM_CLOUD_RPM
 
 
